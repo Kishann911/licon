@@ -16,7 +16,6 @@
   "background": {
     "service_worker": "src/background/service-worker.js"
   },
-
   "side_panel": {
     "default_path": "src/ui/sidepanel.html"
   },
@@ -28,10 +27,21 @@
     "48": "assets/icons/icon48.png",
     "128": "assets/icons/icon128.png"
   },
+  "content_scripts": [
+    {
+      "matches": ["*://www.linkedin.com/*"],
+      "js": ["src/content/main-automator.js"],
+      "run_at": "document_end"
+    }
+  ],
   "web_accessible_resources": [
     {
-      "resources": ["src/content/profile-connector.js"],
-      "matches": ["*://www.linkedin.com/*"]
+      "resources": [
+        "src/content/profile-connector.js"
+      ],
+      "matches": [
+        "*://www.linkedin.com/*"
+      ]
     }
   ],
   "homepage_url": "https://github.com/AnshumanAtrey/licon"

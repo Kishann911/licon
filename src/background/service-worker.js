@@ -1,5 +1,6 @@
-// LICON Background Service Worker
-console.log('🔥 LICON: Background service worker starting...');
+// LICON Background Service Worker - v3.0 - Fixed messaging with handshake protocol
+console.log('🔥 LICON: Background service worker starting... [Version 3.0 - Feb 11, 2026 13:48]');
+
 
 class LiconBackground {
   constructor() {
@@ -24,13 +25,14 @@ class LiconBackground {
       }
     };
     this.failedProfiles = [];
+    this.readyTabs = new Map(); // Track which tabs have content scripts ready
     this.setupListeners();
     console.log('✅ LICON: Background service worker initialized successfully');
   }
 
   setupListeners() {
     console.log('🔧 LICON: Setting up background listeners...');
-    
+
     // Handle messages from content script and popup
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('📨 LICON: Received message:', message.type, 'from:', sender.tab?.url || 'popup');
@@ -42,7 +44,7 @@ class LiconBackground {
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       if (changeInfo.status === 'complete' && tab.url?.includes('linkedin.com')) {
         console.log('🔄 LICON: LinkedIn tab updated:', tab.url);
-        this.handleTabUpdate(tabId, tab);
+        // Content scripts are automatically injected via manifest
       }
     });
 
@@ -62,14 +64,22 @@ class LiconBackground {
       console.log('🔥 LICON: Extension icon clicked, opening side panel');
       chrome.sidePanel.open({ windowId: tab.windowId });
     });
-    
+
+    // Handle tab removal - clean up ready tabs tracking
+    chrome.tabs.onRemoved.addListener((tabId) => {
+      if (this.readyTabs.has(tabId)) {
+        console.log('🗑️ LICON: Removing closed tab', tabId, 'from ready tabs');
+        this.readyTabs.delete(tabId);
+      }
+    });
+
     console.log('✅ LICON: Background listeners setup complete');
   }
 
   async handleMessage(message, sender, sendResponse) {
     try {
       console.log(`🔧 LICON: Processing message type: ${message.type}`);
-      
+
       switch (message.type) {
         case 'START_AUTOMATION':
           console.log('🚀 LICON: Starting automation from background...');
@@ -139,6 +149,22 @@ class LiconBackground {
           sendResponse({ success: true });
           break;
 
+        case 'CONTENT_SCRIPT_READY':
+          console.log('📡 LICON: Content script ready notification from tab:', sender.tab?.id);
+          console.log('📡 LICON: Ready data:', message.data);
+          if (sender.tab) {
+            this.readyTabs.set(sender.tab.id, {
+              url: message.data.url,
+              pageType: message.data.pageType,
+              timestamp: message.data.timestamp,
+              readySince: Date.now()
+            });
+            console.log('✅ LICON: Tab', sender.tab.id, 'marked as ready');
+            console.log('📊 LICON: Total ready tabs:', this.readyTabs.size);
+          }
+          sendResponse({ success: true, message: 'Ready status acknowledged' });
+          break;
+
         case 'GET_FAILED_PROFILES':
           console.log('📋 LICON: Sending failed profiles:', this.failedProfiles.length);
           sendResponse({ failedProfiles: this.failedProfiles });
@@ -200,6 +226,37 @@ class LiconBackground {
     }
 
     console.log('🚀 LICON: Starting automation for:', data.companyUrl);
+
+    // STEP 1: Find LinkedIn tabs with matching URLs
+    const tabs = await chrome.tabs.query({ url: '*://www.linkedin.com/*' });
+    console.log(`📋 LICON: Found ${tabs.length} LinkedIn tabs`);
+
+    if (tabs.length === 0) {
+      throw new Error('No LinkedIn tabs found. Please open a LinkedIn search or company page.');
+    }
+
+    // Filter to supported pages only
+    const supportedTabs = tabs.filter(tab => {
+      const isCompanyPage = tab.url?.match(/linkedin\.com\/company\/[^\/]+\/people/);
+      const isSearchPage = tab.url?.match(/linkedin\.com\/search\/results\/people/);
+      return isCompanyPage || isSearchPage;
+    });
+
+    console.log(`📋 LICON: ${supportedTabs.length} supported tabs (company/search pages)`);
+
+    if (supportedTabs.length === 0) {
+      throw new Error('No supported LinkedIn pages found. Please navigate to a company people page or search results page.');
+    }
+
+    // STEP 2: Ensure all supported tabs are fully loaded
+    const readyTabs = supportedTabs.filter(tab => tab.status === 'complete');
+    console.log(`✅ LICON: ${readyTabs.length} tabs are fully loaded (status: complete)`);
+
+    if (readyTabs.length === 0) {
+      throw new Error('LinkedIn pages are still loading. Please wait for the page to finish loading.');
+    }
+
+    // STEP 3: Set state (content scripts are already injected via manifest)
     this.isRunning = true;
     this.currentCompany = data.companyUrl;
     this.pageInfo = { currentPage: 1, totalPages: 1 };
@@ -213,7 +270,6 @@ class LiconBackground {
       profilesSkipped: 0,
       errors: 0,
       startTime: Date.now(),
-      // Detailed skip reasons
       skipReasons: {
         alreadyConnected: 0,
         pending: 0,
@@ -222,7 +278,6 @@ class LiconBackground {
         other: 0
       }
     };
-    // Clear failed profiles for new session
     this.failedProfiles = [];
 
     // Save state
@@ -234,10 +289,25 @@ class LiconBackground {
       }
     });
 
-    console.log('📡 LICON: Broadcasting automation start message...');
-    // Notify all LinkedIn tabs
-    await this.broadcastToLinkedInTabs({ type: 'AUTOMATION_STARTED' });
-    console.log('✅ LICON: Automation started successfully');
+    // STEP 4: Send AUTOMATION_STARTED to ready tabs
+    console.log('📡 LICON: Sending AUTOMATION_STARTED to ready tabs...');
+
+    let successCount = 0;
+    for (const tab of readyTabs) {
+      try {
+        await chrome.tabs.sendMessage(tab.id, { 
+          type: 'AUTOMATION_STARTED',
+          data: data
+        });
+        successCount++;
+        console.log(`✅ LICON: AUTOMATION_STARTED sent to tab ${tab.id}`);
+      } catch (error) {
+        console.log(`⚠️ LICON: Failed to send message to tab ${tab.id}:`, error.message);
+        // Content script might not be ready yet, but that's okay
+      }
+    }
+
+    console.log(`✅ LICON: Automation started successfully on ${successCount} tab(s)`);
   }
 
   async stopAutomation() {
@@ -257,6 +327,10 @@ class LiconBackground {
   }
 
   updateStats(data) {
+    console.log('📊 LICON BG: updateStats called with data:', data);
+    console.log('📊 LICON BG: Current stats before update:', JSON.parse(JSON.stringify(this.stats)));
+
+    // Handle the new data format from content script
     if (data.processed) this.stats.totalProcessed++;
     if (data.attempted) this.stats.connectionsAttempted++;
     if (data.successful) this.stats.connectionsSuccessful++;
@@ -273,24 +347,39 @@ class LiconBackground {
         case 'pending':
           this.stats.skipReasons.pending++;
           break;
+        case 'noActionButton':
+          this.stats.skipReasons.noConnectButton++;
+          break;
         case 'noConnectButton':
           this.stats.skipReasons.noConnectButton++;
           break;
         case 'followOnly':
           this.stats.skipReasons.followOnly++;
           break;
+        case 'emailRequired':
+          this.stats.skipReasons.other++;
+          break;
+        case 'modalSendFailed':
+          this.stats.skipReasons.other++;
+          break;
         default:
           this.stats.skipReasons.other++;
       }
     }
 
-    // Save updated stats
+    console.log('📊 LICON BG: Stats after update:', JSON.parse(JSON.stringify(this.stats)));
+
+    // Save updated stats immediately
     chrome.storage.local.set({
       liconState: {
         isRunning: this.isRunning,
         currentCompany: this.currentCompany,
         stats: this.stats
       }
+    }).then(() => {
+      console.log('📊 LICON BG: Stats saved to storage successfully');
+    }).catch(error => {
+      console.error('📊 LICON BG: Failed to save stats to storage:', error);
     });
   }
 
@@ -338,31 +427,17 @@ class LiconBackground {
     }
   }
 
-  async handleTabUpdate(tabId, tab) {
-    if (!this.isRunning) return;
+  async broadcastToLinkedInTabs(message, options = {}) {
+    const maxRetries = options.maxRetries || 2;
+    const retryDelay = options.retryDelay || 1000;
 
-    // Check if this is a supported LinkedIn page (company people or search results)
-    const isCompanyPage = tab.url?.match(/linkedin\.com\/company\/[^\/]+\/people/);
-    const isSearchPage = tab.url?.match(/linkedin\.com\/search\/results\/people/);
-
-    if (isCompanyPage || isSearchPage) {
-      // Inject our content script if not already present
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          files: ['src/content/main-automator.js']
-        });
-      } catch (error) {
-        // Script might already be injected
-        console.log('Content script injection skipped:', error.message);
-      }
-    }
-  }
-
-  async broadcastToLinkedInTabs(message) {
     const tabs = await chrome.tabs.query({ url: '*://www.linkedin.com/*' });
     console.log(`🔄 LICON: Broadcasting message "${message.type}" to ${tabs.length} LinkedIn tabs`);
-    
+
+    let successCount = 0;
+    let attemptCount = 0;
+    const failedTabs = [];
+
     for (const tab of tabs) {
       try {
         // Process company people pages AND search results pages
@@ -370,63 +445,124 @@ class LiconBackground {
         const isSearchPage = tab.url?.match(/linkedin\.com\/search\/results\/people/);
 
         if (isCompanyPage || isSearchPage) {
+          attemptCount++;
           console.log(`📤 LICON: Processing tab ${tab.id}: ${tab.url}`);
-          
-          // Test if content script is already loaded by sending a ping
-          let contentScriptLoaded = false;
-          try {
-            console.log(`🧪 LICON: Testing if content script exists in tab ${tab.id}...`);
-            const pingResponse = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
-            contentScriptLoaded = !!pingResponse;
-            console.log(`✅ LICON: Content script already loaded in tab ${tab.id}`);
-          } catch (error) {
-            console.log(`📤 LICON: Content script not loaded in tab ${tab.id}, injecting...`);
-            
+
+          // Check if tab is in ready state (received CONTENT_SCRIPT_READY)
+          const isReady = this.readyTabs.has(tab.id);
+          console.log(`📊 LICON: Tab ${tab.id} ready status: ${isReady}`);
+
+          let delivered = false;
+          let lastError = null;
+
+          // Try to deliver message with retries
+          for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
-              await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                files: ['src/content/main-automator.js']
-              });
-              console.log(`✅ LICON: Content script injected to tab ${tab.id}`);
-              
-              // Wait longer for script to initialize after injection
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            } catch (injectError) {
-              console.error(`❌ LICON: Failed to inject content script to tab ${tab.id}:`, injectError.message);
-              continue;
-            }
-          }
-          
-          // Send the message with retry logic
-          let retries = 3;
-          let messageSent = false;
-          
-          while (retries > 0 && !messageSent) {
-            try {
-              console.log(`📨 LICON: Sending "${message.type}" to tab ${tab.id} (attempt ${4 - retries})`);
-              const response = await chrome.tabs.sendMessage(tab.id, message);
-              console.log(`✅ LICON: Message sent successfully to tab ${tab.id}`, response);
-              messageSent = true;
-            } catch (error) {
-              retries--;
-              console.log(`❌ LICON: Failed to send message to tab ${tab.id} (${retries} retries left):`, error.message);
-              
-              if (retries > 0) {
-                console.log(`⏳ LICON: Waiting 1 second before retry...`);
-                await new Promise(resolve => setTimeout(resolve, 1000));
+              if (attempt > 0) {
+                console.log(`🔄 LICON: Retry attempt ${attempt}/${maxRetries} for tab ${tab.id}`);
+                await this.sleep(retryDelay);
               }
+
+              // For critical messages (AUTOMATION_STARTED), PING first to validate connection
+              if (message.type === 'AUTOMATION_STARTED' && attempt === 0) {
+                console.log(`🏓 LICON: Sending PING to tab ${tab.id} before ${message.type}...`);
+                try {
+                  const pingResponse = await this.sendMessageWithTimeout(tab.id, { type: 'PING' }, 2000);
+                  if (!pingResponse || !pingResponse.success) {
+                    console.log(`⚠️ LICON: PING failed for tab ${tab.id}, will retry`);
+                    throw new Error('PING failed');
+                  }
+                  console.log(`✅ LICON: PING successful for tab ${tab.id}`);
+                } catch (pingError) {
+                  console.log(`❌ LICON: PING error for tab ${tab.id}:`, pingError.message);
+                  // Continue to retry with actual message
+                  throw pingError;
+                }
+              }
+
+              // Send the actual message
+              await chrome.tabs.sendMessage(tab.id, message);
+              delivered = true;
+              successCount++;
+              console.log(`✅ LICON: Message "${message.type}" delivered to tab ${tab.id}`);
+              break; // Success, exit retry loop
+
+            } catch (error) {
+              lastError = error;
+              console.log(`⚠️ LICON: Attempt ${attempt + 1} failed for tab ${tab.id}:`, error.message);
             }
           }
-          
-          if (!messageSent) {
-            console.error(`❌ LICON: Failed to send message to tab ${tab.id} after all retries`);
+
+          if (!delivered) {
+            failedTabs.push({
+              tabId: tab.id,
+              url: tab.url,
+              isReady: isReady,
+              error: lastError?.message || 'Unknown error'
+            });
+            console.log(`❌ LICON: Failed to deliver to tab ${tab.id} after ${maxRetries + 1} attempts`);
           }
         }
-        
+
       } catch (error) {
         console.error(`❌ LICON: Error processing tab ${tab.id}:`, error.message);
       }
     }
+
+    // Log detailed results
+    console.log(`📊 LICON: Broadcast complete - ${successCount}/${attemptCount} tabs received message`);
+    if (failedTabs.length > 0) {
+      console.log('❌ LICON: Failed tabs:', failedTabs);
+    }
+
+    // CRITICAL: If we tried to send to tabs but none succeeded, automation cannot run
+    if (attemptCount > 0 && successCount === 0 && message.type === 'AUTOMATION_STARTED') {
+      console.log('🔴 LICON: ========================================');
+      console.log('🔴 LICON: CRITICAL: No tabs could receive the message!');
+      console.log('🔴 LICON: Content script is not loaded or not ready.');
+      console.log('🔴 LICON: Possible causes:');
+      console.log('   1. Page navigated via SPA before content script loaded');
+      console.log('   2. Content script crashed or was garbage collected');
+      console.log('   3. LinkedIn page is not fully loaded');
+      console.log('🔴 LICON: ========================================');
+
+      // Stop automation and save error state
+      this.isRunning = false;
+      await chrome.storage.local.set({
+        liconState: {
+          isRunning: false,
+          currentCompany: null,
+          stats: this.stats,
+          lastError: 'Content script not reachable - no tabs received message'
+        }
+      });
+
+      // Return error indicator
+      return { success: false, successCount: 0, attemptCount, failedTabs };
+    }
+
+    return { success: successCount > 0, successCount, attemptCount, failedTabs };
+  }
+
+  async sendMessageWithTimeout(tabId, message, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Message timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      chrome.tabs.sendMessage(tabId, message, (response) => {
+        clearTimeout(timer);
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve(response);
+        }
+      });
+    });
+  }
+
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   async getSettings() {

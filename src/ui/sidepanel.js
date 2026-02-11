@@ -118,6 +118,11 @@ class LiconSidePanel {
         this.checkLinkedInPage();
       }
     });
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+      this.stopStatusPolling();
+    });
   }
 
   validateInput(input) {
@@ -148,6 +153,8 @@ class LiconSidePanel {
       const response = await this.sendMessage({ type: 'GET_STATUS' });
 
       if (response) {
+        console.log('📊 LICON UI: Received status update:', response);
+        
         this.isRunning = response.isRunning;
         this.stats = response.stats || this.stats;
 
@@ -173,10 +180,18 @@ class LiconSidePanel {
         if (response.currentCompany) {
           this.showCompanyInfo(response.currentCompany);
         }
+        
+        console.log('📊 LICON UI: Stats updated in UI:', this.stats);
+      } else {
+        console.warn('📊 LICON UI: No response received from background script');
       }
     } catch (error) {
-      console.error('Failed to load status:', error);
-      this.showToast('Failed to connect to LICON service', 'error');
+      console.error('📊 LICON UI: Failed to load status:', error);
+      // Only show toast if this is the first error or if we haven't shown one recently
+      if (!this.lastStatusError || Date.now() - this.lastStatusError > 10000) {
+        this.showToast('Failed to connect to LICON service', 'error');
+        this.lastStatusError = Date.now();
+      }
     }
   }
 
@@ -308,6 +323,8 @@ class LiconSidePanel {
   }
 
   updateUI() {
+    console.log('🎨 LICON UI: Updating UI with stats:', this.stats);
+    
     // Update status indicator
     const statusDot = document.getElementById('statusDot');
     const statusText = document.getElementById('statusText');
@@ -340,10 +357,22 @@ class LiconSidePanel {
     }
     
     // Update stats with animations
-    this.updateStatWithAnimation('processedCount', this.stats.totalProcessed || 0);
-    this.updateStatWithAnimation('connectedCount', this.stats.connectionsSuccessful || 0);
-    this.updateStatWithAnimation('skippedCount', this.stats.profilesSkipped || 0);
-    this.updateStatWithAnimation('errorCount', this.stats.errors || 0);
+    const processedCount = this.stats.totalProcessed || 0;
+    const connectedCount = this.stats.connectionsSuccessful || 0;
+    const skippedCount = this.stats.profilesSkipped || 0;
+    const errorCount = this.stats.errors || 0;
+    
+    console.log('🎨 LICON UI: Updating stat elements:', {
+      processed: processedCount,
+      connected: connectedCount, // This now includes both connections and follows
+      skipped: skippedCount,
+      errors: errorCount
+    });
+    
+    this.updateStatWithAnimation('processedCount', processedCount);
+    this.updateStatWithAnimation('connectedCount', connectedCount); // Label will show "Connected/Followed"
+    this.updateStatWithAnimation('skippedCount', skippedCount);
+    this.updateStatWithAnimation('errorCount', errorCount);
 
     // Update skip reasons breakdown
     this.updateSkipReasons();
@@ -488,14 +517,34 @@ class LiconSidePanel {
   }
 
   startStatusPolling() {
-    // Poll status every 2 seconds when side panel is open
+    // Clear any existing interval first
+    if (this.statusInterval) {
+      clearInterval(this.statusInterval);
+    }
+    
+    // Poll status every 1 second when side panel is open for better responsiveness
     this.statusInterval = setInterval(async () => {
-      await this.loadStatus();
-      // Also refresh failed profiles during automation
-      if (this.isRunning) {
-        await this.loadFailedProfiles();
+      try {
+        await this.loadStatus();
+        // Also refresh failed profiles during automation
+        if (this.isRunning) {
+          await this.loadFailedProfiles();
+        }
+      } catch (error) {
+        console.error('Status polling error:', error);
+        // Don't show toast for polling errors to avoid spam
       }
-    }, 2000);
+    }, 1000); // Reduced from 2000ms to 1000ms for better responsiveness
+    
+    console.log('📊 LICON UI: Status polling started (1s interval)');
+  }
+
+  stopStatusPolling() {
+    if (this.statusInterval) {
+      clearInterval(this.statusInterval);
+      this.statusInterval = null;
+      console.log('📊 LICON UI: Status polling stopped');
+    }
   }
 
   addInitialAnimations() {
